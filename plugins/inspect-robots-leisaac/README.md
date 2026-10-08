@@ -21,6 +21,130 @@ OMNI_KIT_ACCEPT_EULA=YES inspect-robots "lift the cube" --policy agent \
 Pass `-E headless=false` to open an Isaac Sim viewport. `--max-steps 1500` matches LiftCube's
 25 s episodes at 60 Hz; the default of 300 steps is only 5 s.
 
+## Architecture: how the agentic loop works
+
+You type a command. One LLM turns it into Python, small helpers supply perception, geometry and
+inverse kinematics, the motion is limit-checked and played in the simulator, and the model reads
+the result before its next turn. GitHub renders the diagrams below.
+
+```mermaid
+flowchart LR
+    user(["You type:<br/>pick up the red cube"]) --> cli
+
+    subgraph main["Main process: Isaac Lab Python environment, on the GPU"]
+        direction LR
+        cli["inspect-robots CLI<br/>trial loop and scoring"]
+
+        subgraph policy["Policy: capx"]
+            direction TB
+            llm["LLM client"]
+            sandbox["Code sandbox<br/>runs the model's Python<br/>with robot helpers"]
+            queue["Motion queue<br/>speed-limited trajectory"]
+            llm --> sandbox --> queue
+        end
+
+        approvers["Approvers<br/>joint limits,<br/>step limit"]
+
+        subgraph emb["Embodiment: leisaac SO-101"]
+            direction TB
+            adapter["Isaac Lab adapter"]
+            sim["Isaac Sim 6.1<br/>LiftCube scene<br/>SO-101 and RGB camera"]
+            adapter <--> sim
+        end
+
+        cli -->|"observation"| llm
+        queue -->|"action chunk"| approvers
+        approvers -->|"joint targets"| adapter
+        adapter -->|"observation"| cli
+    end
+
+    subgraph services["Separate processes and services"]
+        direction TB
+        claude["Claude API"]
+        sam3["SAM3 server<br/>text to mask, CPU"]
+        ik["IK server<br/>Pyroki, CPU"]
+    end
+
+    logs[("Logs: EvalLog,<br/>transcripts, frames")]
+
+    llm <-->|"Python code"| claude
+    sandbox -->|"segment"| sam3
+    sandbox -->|"solve_ik"| ik
+    sim -.->|"success flag:<br/>scoring only"| cli
+    cli --> logs
+```
+
+- **CLI and trial loop:** `inspect-robots` resets the scene, alternates policy and embodiment
+  until the trial ends, scores it, and writes the log. `--epochs 8` repeats it with seeded cube
+  placements.
+- **Policy, `capx`:** one LLM in a write-code, read-the-result loop. It sees the front image, the
+  joint positions and the last run's output. It is not several cooperating agents.
+- **Code sandbox and helpers:** the model's Python runs in the same process (this is not a
+  security sandbox). The helpers are perception (`segment`, served by SAM3), table-plane geometry
+  (`object_center`, `box_yaw`, `top_down_quat`, `grasp_position`), inverse kinematics (`solve_ik`,
+  served by Pyroki) and motion (`move_to_joints`, `open_gripper`, `close_gripper`).
+- **Motion queue and approvers:** motion calls queue a speed-limited joint trajectory. Approvers
+  clamp each action to the joint limits and cap the change per step, so the model cannot command
+  a jump.
+- **Embodiment, `leisaac`:** takes six absolute joint targets in radians at 60 Hz. It returns the
+  front image, joint positions, and the camera calibration and table height as extras.
+- **Isaac Sim:** the LeIsaac `LiftCube` scene with the SO-101, a cube, a table and an RGB camera.
+- **SAM3 and IK servers:** separate processes in separate Python environments, called over HTTP
+  and run on the CPU so the GPU stays with the simulator.
+- **Claude API:** the only call that leaves the machine.
+- **Success flag:** the simulator ends the episode when the cube is lifted. It scores the trial
+  and is never shown to the model.
+
+One trial, step by step:
+
+```mermaid
+sequenceDiagram
+    participant S as Isaac Sim
+    participant E as Embodiment
+    participant P as capx policy
+    participant L as Claude
+    participant X as Code sandbox
+    participant M as SAM3 server
+    participant K as IK server
+
+    E->>S: reset, then hold the arm 2 steps
+    S-->>E: front image, joint positions
+    E-->>P: observation and camera calibration
+
+    loop until FINISH, GIVE_UP, success or the step limit
+        P->>L: observation and the last execution report
+        L-->>P: Python code
+        P->>X: run the code
+        X->>M: segment red cube
+        M-->>X: mask
+        Note over X,M: object_center, box_yaw, grasp_position<br/>turn the mask into a grasp pose<br/>by table-plane geometry
+        X->>K: solve_ik for the pose
+        K-->>X: joint angles
+        Note over X,K: move_to_joints, open_gripper, close_gripper<br/>queue a speed-limited joint trajectory
+        X-->>P: stdout, stderr and the queued motion
+        P->>E: action chunk of joint targets
+        loop each action in the chunk
+            E->>S: step with the joint targets
+            S-->>E: new observation, terminated or not
+        end
+    end
+    Note over S,P: Termination means the cube was lifted.<br/>It scores the trial and is never shown to Claude.
+```
+
+**How the plain `agent` policy differs.** It has no sandbox, helpers or servers. Claude calls
+`move_joints` and `take_pic` tools and chooses joint angles from the image alone, so it has to
+judge depth and gripper alignment by eye. The results below show what that costs.
+
+**Where each piece lives**
+
+| Piece | Location |
+|---|---|
+| `capx` policy, sandbox, motion queue, server clients | `plugins/inspect-robots-capx` |
+| `leisaac` embodiment, geometry, helper pack | `plugins/inspect-robots-leisaac/src/inspect_robots_leisaac` |
+| Isaac Lab adapter the embodiment builds on | `plugins/inspect-robots-isaacsim` |
+| SAM3 and IK servers, SO-101 URDF | `plugins/inspect-robots-leisaac/servers` |
+| `LiftCube` task and robot assets | the leisaac repo, `source/leisaac/leisaac/tasks/lift_cube` |
+
 ## Action and state
 
 The action is six absolute joint targets in radians: `shoulder_pan`, `shoulder_lift`,
