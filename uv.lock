@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -13,6 +13,7 @@ members = [
     "inspect-robots-agent",
     "inspect-robots-capx",
     "inspect-robots-isaacsim",
+    "inspect-robots-leisaac",
     "inspect-robots-ros",
     "inspect-robots-voice",
     "inspect-robots-xpolicylab",
@@ -872,6 +873,37 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "inspect-robots", editable = "." },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "inspect-robots-leisaac"
+version = "0.1.0"
+source = { editable = "plugins/inspect-robots-leisaac" }
+dependencies = [
+    { name = "inspect-robots" },
+    { name = "inspect-robots-isaacsim" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "inspect-robots", editable = "." },
+    { name = "inspect-robots-isaacsim", editable = "plugins/inspect-robots-isaacsim" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

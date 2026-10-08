@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-leisaac"
+version = "0.1.0"
+description = "LeIsaac SO-101 embodiment for Inspect Robots: drive a simulated SO-101 arm in Isaac Sim through Isaac Lab."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+keywords = ["robotics", "isaac-sim", "isaac-lab", "so-101", "leisaac", "inspect_robots"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+# Isaac Sim, Isaac Lab and leisaac are NOT declared: they come from the user's
+# Isaac Lab environment (GPU required) and are imported lazily by reset()/step().
+dependencies = ["inspect-robots>=0.2", "inspect-robots-isaacsim>=0.1.1", "numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
+
+[project.entry-points."inspect_robots.embodiments"]
+leisaac = "inspect_robots_leisaac:leisaac_embodiment"
+
+[tool.uv.sources]
+inspect-robots = { workspace = true }
+inspect-robots-isaacsim = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_leisaac"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_leisaac", "tests", "README.md"]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_isaacsim", "inspect_robots_leisaac"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D1"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["isaaclab.*", "isaaclab_tasks.*", "leisaac.*", "gymnasium.*", "torch.*"]
+ignore_missing_imports = true
