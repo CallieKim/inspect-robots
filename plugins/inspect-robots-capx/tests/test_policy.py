@@ -406,6 +406,34 @@ def test_clean_perception_turn_resets_consecutive_failure_counter() -> None:
     assert stopped.actions[0].meta["stop_reason"] == "FINISH"
 
 
+def test_prose_before_a_control_word_stops_the_trial() -> None:
+    script = _ScriptedTransport(
+        [_completion("The cube is held clear of the table, so the task looks complete.\n\nFINISH")]
+    )
+    policy = _bound_policy(script)
+
+    stopped = policy.act(_observation())
+
+    assert stopped.actions[0].meta["stop_reason"] == "FINISH"
+
+
+def test_unfenced_prose_then_code_runs_the_code() -> None:
+    script = _ScriptedTransport(
+        [
+            _completion(
+                "I will nudge joint zero a little.\n\n"
+                "import numpy as np\nmove_to_joints(np.array([0.1, 0.0]))"
+            )
+        ]
+    )
+    policy = _bound_policy(script)
+
+    chunk = policy.act(_observation())
+
+    assert len(chunk.actions) > 1
+    assert "stop_reason" not in chunk.actions[0].meta
+
+
 def test_call_budget_forces_give_up_after_clean_empty_turn() -> None:
     policy = _bound_policy(
         _ScriptedTransport([_completion("print('nothing queued')")]),
@@ -677,3 +705,39 @@ def test_registry_entry_point_resolves_and_factory_forwards_kwargs() -> None:
     assert resolved.config.max_llm_calls == 9
     direct.close()
     resolved.close()
+
+
+def test_helper_pack_is_loaded_documented_and_recorded() -> None:
+    policy = _policy(_ScriptedTransport([]), helpers="_helper_packs:pack")
+    policy.bind(_info())
+    policy.reset(Scene(id="s0", instruction="pick the cube"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    system = transcript[0]["content"]
+    assert isinstance(system, str)
+    assert system.index("You generate Python code") < system.index("Additional helpers:")
+    assert system.index("Additional helpers:") < system.index("Embodiment notes:")
+    assert "object_count() -> int" in system
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.helpers == "_helper_packs:pack"
+    assert policy._sandbox is not None
+    assert "double" in policy._sandbox._namespace
+    policy.close()
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "no_colon",
+        ":attr",
+        "module_only:",
+        "no_such_module_xyz:pack",
+        "_helper_packs:missing",
+        "_helper_packs:not_callable",
+    ],
+)
+def test_bad_helper_pack_specs_raise_config_errors(spec: str) -> None:
+    with pytest.raises(ConfigError):
+        _policy(_ScriptedTransport([]), helpers=spec)

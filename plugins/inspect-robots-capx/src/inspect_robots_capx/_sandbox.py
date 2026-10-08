@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import traceback
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +56,13 @@ class _TurnView(dict[str, Any]):
         return self[key]
 
 
+HelperPack = Callable[[Callable[[], Mapping[str, Any]]], Mapping[str, Callable[..., Any]]]
+"""Binds extra helpers: takes a getter for the turn's ``obs`` view, returns name -> callable.
+
+A pack may carry a ``docs`` string attribute, appended to the helper documentation in the prompt.
+"""
+
+
 class CodeSandbox:
     """Persistent per-trial Python namespace with observation-bound robot helpers."""
 
@@ -68,8 +76,10 @@ class CodeSandbox:
         depth_key: str = "depth",
         intrinsics_key: str = "intrinsics",
         extrinsics_key: str = "extrinsics",
+        helper_pack: HelperPack | None = None,
     ) -> None:
         self._servers = servers
+        self._helper_pack = helper_pack
         self._motion = motion
         self._camera = camera
         self._state_key = state_key
@@ -93,6 +103,8 @@ class CodeSandbox:
             "open_gripper": self._motion.open_gripper,
             "close_gripper": self._motion.close_gripper,
         }
+        if self._helper_pack is not None:
+            self._namespace.update(self._helper_pack(self._current_obs))
 
     def set_observation(self, observation: Observation) -> None:
         """Expose one turn's observation and reseed motion from its full state field."""
@@ -125,6 +137,13 @@ class CodeSandbox:
                 raised = True
                 traceback.print_exc()
         return ExecutionResult(stdout=stdout.getvalue(), stderr=stderr.getvalue(), raised=raised)
+
+    def _current_obs(self) -> Mapping[str, Any]:
+        obs = self._namespace.get("obs")
+        if obs is None:
+            raise RuntimeError("no observation is bound for this code turn")
+        result: Mapping[str, Any] = obs
+        return result
 
     def _require_observation(self) -> Observation:
         if self._observation is None:

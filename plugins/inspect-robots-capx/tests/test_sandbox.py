@@ -171,3 +171,32 @@ def test_obs_get_propagates_errors_raised_inside_thunks(capx_stub: CapxStub) -> 
 
     assert result.raised is True
     assert "embodiment thunk bug" in result.stderr
+
+
+def _pack(get_obs: Callable[[], Any]) -> dict[str, Callable[..., Any]]:
+    return {"object_count": lambda: get_obs()["objects"], "double": lambda x: 2 * x}
+
+
+def test_helper_pack_binds_helpers_that_see_the_current_observation(capx_stub: CapxStub) -> None:
+    sandbox, _, _ = _sandbox(capx_stub)
+    sandbox._helper_pack = _pack
+    sandbox.reset()
+    sandbox.set_observation(_observation(objects=3))
+
+    first = sandbox.execute("seen = object_count()\ndoubled = double(4)\nprint(seen, doubled)")
+    sandbox.set_observation(_observation(objects=5))
+    second = sandbox.execute("print(object_count())")
+
+    assert not first.raised and first.stdout.strip() == "3 8"
+    assert not second.raised and second.stdout.strip() == "5"
+
+
+def test_helper_pack_getter_requires_a_bound_observation(capx_stub: CapxStub) -> None:
+    sandbox, _, _ = _sandbox(capx_stub)
+    sandbox._helper_pack = _pack
+    sandbox.reset()
+
+    result = sandbox.execute("object_count()")
+
+    assert result.raised
+    assert "no observation is bound" in result.stderr

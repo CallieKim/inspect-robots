@@ -8,10 +8,12 @@ external container or equivalent isolation.
 
 from __future__ import annotations
 
+import ast
 import atexit
 import contextlib
 import copy
 import hashlib
+import importlib
 import os
 import re
 import sys
@@ -38,7 +40,7 @@ from inspect_robots_agent import (
     resolve_provider,
 )
 from inspect_robots_capx._motion import MotionQueue
-from inspect_robots_capx._sandbox import CodeSandbox, ExecutionResult
+from inspect_robots_capx._sandbox import CodeSandbox, ExecutionResult, HelperPack
 from inspect_robots_capx._servers import CapxServerClients
 
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
@@ -61,7 +63,14 @@ _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 _FENCED_CODE = re.compile(r"^```(?:python)?[ \t]*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _FENCED_ANYWHERE = re.compile(r"```(?:python)?[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+# Some models answer in their native tool-call markup, ``<invoke name=".."><parameter name="code">
+# ..</parameter></invoke>``, even when asked for raw Python; the ``<parameter>`` tag is sometimes
+# left out and the code sits directly inside ``<invoke>``. An unterminated block runs to the end.
+_INVOKE_BLOCK = re.compile(
+    r"<invoke\b[^>]*>\s*(?:<parameter\b[^>]*>)?(.*?)(?:</parameter>|</invoke>|\Z)", re.DOTALL
+)
 _CONTROL_WORD = re.compile(r"(FINISH|GIVE_UP)[.!]?", re.IGNORECASE)
+_EMPTY_INVOKE = re.compile(r"<invoke\b[^>]*>\s*</invoke>")
 
 _HELPER_DOCS = """Helpers available in the persistent namespace:
 
@@ -148,6 +157,8 @@ class CapxPolicyConfig(PolicyConfig):
     prior_learnings: str | None = None
     #: SHA-256 hexdigest of the injected prior-learnings text.
     prior_learnings_sha256: str | None = None
+    #: ``module:attr`` of the extra-helper pack bound into the code namespace, if any.
+    helpers: str | None = None
 
 
 class CapxPolicy(PolicyBase):
@@ -179,6 +190,7 @@ class CapxPolicy(PolicyBase):
         gripper_open_is_high: bool = True,
         transcript_echo: bool = False,
         prior_learnings: str | None = None,
+        helpers: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ) -> None:
@@ -274,6 +286,7 @@ class CapxPolicy(PolicyBase):
         self._gripper_open_is_high = gripper_open_is_high
         self._transcript_echo = transcript_echo
         self._prior_learnings_text = prior_learnings_text
+        self._helper_pack = None if helpers is None else _load_helper_pack(helpers)
         self.config = CapxPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -296,6 +309,7 @@ class CapxPolicy(PolicyBase):
             transcript_echo=transcript_echo,
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
+            helpers=helpers,
         )
         self.info = PolicyInfo(name="capx", action_space=Box(shape=(1,)))
         self._motion: MotionQueue | None = None
@@ -383,6 +397,7 @@ class CapxPolicy(PolicyBase):
             depth_key=self._depth_key,
             intrinsics_key=self._intrinsics_key,
             extrinsics_key=self._extrinsics_key,
+            helper_pack=self._helper_pack,
         )
         self._state_key = state_key
         self._state_labels = (state_key, labels) if labels is not None else None
@@ -419,6 +434,9 @@ class CapxPolicy(PolicyBase):
                 extrinsics_key=self._extrinsics_key,
             ),
         )
+        pack_docs = getattr(self._helper_pack, "docs", "")
+        if isinstance(pack_docs, str) and pack_docs.strip():
+            system += "\n\nAdditional helpers:\n" + pack_docs.strip()
         if self._embodiment_docs is not None and self._embodiment_docs.strip():
             system += "\n\nEmbodiment notes:\n" + self._embodiment_docs.strip()
         if self._prior_learnings_text is not None:
@@ -490,11 +508,11 @@ class CapxPolicy(PolicyBase):
             reply = (message.content or "").strip()
             if reply:
                 self._echo(f"[capx] << {reply}")
-            control = _CONTROL_WORD.fullmatch(reply)
+            control = _control_word(reply)
             if control is not None:
                 return motion.hold_chunk(
                     state,
-                    stop_reason=control.group(1).upper(),
+                    stop_reason=control,
                     inference_latency_s=llm_latency,
                 )
 
@@ -538,22 +556,117 @@ class CapxPolicy(PolicyBase):
             self._echo(f"[capx] stderr:\n{result.stderr.rstrip()}")
 
 
+def _load_helper_pack(spec: str) -> HelperPack:
+    """Import a ``module:attr`` helper pack; ``ConfigError`` carries a fix hint on any failure."""
+    module_name, _, attr = spec.partition(":")
+    if not module_name or not attr:
+        raise ConfigError(
+            f"helpers must be 'module:attr', got {spec!r}.\n"
+            "fix: pass -P helpers=my_package.helpers:pack"
+        )
+    try:
+        pack = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as exc:
+        raise ConfigError(
+            f"could not load helper pack {spec!r}: {exc}.\n"
+            "fix: install the package into this environment and check the module:attr spelling"
+        ) from exc
+    if not callable(pack):
+        raise ConfigError(f"helper pack {spec!r} is not callable")
+    result: HelperPack = pack
+    return result
+
+
 def _extract_code(message: AssistantMessage) -> str:
-    """Normalize raw, fenced, prose-wrapped, or ``REGENERATE``-prefixed code.
+    """Normalize raw, fenced, tool-call-wrapped, prose-wrapped, or ``REGENERATE``-prefixed code.
 
     A reply that is exactly one fenced block (or a bare snippet) is used as
     is; otherwise the first fenced block wins, so surrounding prose does not
-    burn a failure turn on a ``SyntaxError``.
+    burn a failure turn on a ``SyntaxError``. A reply in tool-call markup yields
+    the code of its first block only: models that fall into that format tend to
+    keep writing, inventing the execution output and further blocks before any
+    code has run, and none of that continuation is real.
     """
     code = (message.content or "").strip()
     first, separator, remainder = code.partition("\n")
     if first.strip() == "REGENERATE" and separator:
         code = remainder.strip()
+    if "<invoke" in code:
+        code = _EMPTY_INVOKE.sub("", code).strip()
     fenced = _FENCED_CODE.fullmatch(code)
     if fenced is not None:
         return fenced.group(1)
+    invoked = _INVOKE_BLOCK.search(code)
+    if invoked is not None and code.startswith("<invoke"):
+        return invoked.group(1).strip("\n")
     embedded = _FENCED_ANYWHERE.search(code)
-    return embedded.group(1) if embedded is not None else code
+    if embedded is not None:
+        return embedded.group(1)
+    if invoked is not None:
+        return invoked.group(1).strip("\n")
+    return _drop_leading_prose(code)
+
+
+def _parses(text: str) -> bool:
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return False
+    return True
+
+
+def _is_prose(paragraph: str) -> bool:
+    """Whether a blank-line-separated paragraph reads as a sentence, not as broken code.
+
+    Deliberately strict, so a paragraph of code with a typo is never mistaken for prose and
+    silently skipped: no ``=``, no line ending in a bracket, colon, comma or backslash, no markup.
+    """
+    lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+    return (
+        bool(lines)
+        and "<invoke" not in paragraph
+        and not any("=" in line or line.endswith((")", "]", "}", ":", ",", "\\")) for line in lines)
+        and not _parses(paragraph)
+    )
+
+
+def _drop_leading_prose(text: str) -> str:
+    """Drop leading explanatory paragraphs that precede otherwise valid Python.
+
+    Applies only when the whole reply does not parse and every dropped paragraph is prose
+    (see :func:`_is_prose`); anything else is returned unchanged, so a genuine syntax error in
+    the model's code still reaches it as feedback.
+    """
+    if _parses(text):
+        return text
+    paragraphs = re.split(r"\n\s*\n", text)
+    for index in range(1, len(paragraphs)):
+        if not _is_prose(paragraphs[index - 1]):
+            break
+        rest = "\n\n".join(paragraphs[index:])
+        if _parses(rest):
+            return rest
+    return text
+
+
+def _control_word(reply: str) -> str | None:
+    """Return ``FINISH`` or ``GIVE_UP`` when the reply is that word, alone or after prose.
+
+    A reply of explanation followed by a final control line counts, since nothing in it is code;
+    one that follows code, or tool-call markup, does not, so a half-written answer is never
+    mistaken for a request to stop.
+    """
+    stripped = reply.strip()
+    whole = _CONTROL_WORD.fullmatch(stripped)
+    if whole is not None:
+        return whole.group(1).upper()
+    *body, last = stripped.splitlines() or [""]
+    final = _CONTROL_WORD.fullmatch(last.strip())
+    if final is not None and body:
+        paragraphs = re.split(r"\n\s*\n", "\n".join(body).strip())
+        if all(_is_prose(paragraph) for paragraph in paragraphs):
+            return final.group(1).upper()
+    return None
 
 
 def _execution_report(code: str, result: ExecutionResult) -> str:
