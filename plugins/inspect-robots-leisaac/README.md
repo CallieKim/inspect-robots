@@ -86,15 +86,23 @@ The server sets the default device itself. The GPU path works on the unpatched c
 Same 8 cube placements (`--seed 0 --epochs 8`), same model (`claude-sonnet-5-5`, effort low),
 1500 steps, `max_speed_frac=0.3`, instruction "pick up the red cube".
 
-| Policy | Succeeded | LLM calls | Other outcomes |
-|---|---|---|---|
-| `capx` with the table-top helpers | 4 of 8 | 34 (cap 15 per trial) | 3 ran out of steps, 1 said FINISH without success |
-| plain `agent` (joint targets from images) | 1 of 8 | 200 (cap 30 per trial) | 6 gave up, 1 reported done without success |
+| Policy | Notes in the prompt | Succeeded | LLM calls | Other outcomes |
+|---|---|---|---|---|
+| `capx` with the table-top helpers | first version | 4 of 8 | 34 | 3 ran out of steps, 1 FINISH without success |
+| `capx` with the table-top helpers | current | **7 of 8** | 24 | 1 ran out of steps |
+| plain `agent` (joint targets from images) | first version | 1 of 8 | 200 | 6 gave up, 1 reported done without success |
+| plain `agent` (joint targets from images) | current | **0 of 8** | 206 | all 8 gave up |
 
-Eight trials per policy is too few to call this a significant difference (Fisher exact p = 0.28;
-95 percent intervals 22 to 78 percent and 2 to 47 percent). The two policies succeeded on
-different placements, so the gap is not a simple ordering. The capx policy also has a large
-advantage the agent does not: perception, geometry and IK tools designed for this robot.
+"Current" notes add the gripper-reading hint and the corrected lift height (see below); both
+policies read them. On identical placements the difference between `capx` (current, 7 of 8) and the
+plain agent (current, 0 of 8) is significant (Fisher exact p = 0.0014; 95 percent intervals 53 to
+98 percent and 0 to 32 percent). Against the plain agent's first run (1 of 8) it is p = 0.010. The
+extra notes did not help the plain agent: its own stated reasons are that the gripper "closed on
+nothing" (reading about 0.014, so it read the hint correctly) and that it could not line the jaws
+up with the cube from the single oblique camera view. The capx policy has what the agent lacks:
+perception, geometry and IK tools designed for this robot, so the table measures "an LLM with those
+tools against an LLM guessing joint angles", not the models themselves. Eight trials each is still
+a small sample, and the cube positions are one fixed set of eight.
 
 In 7 of 8 capx trials the first reply was wrapped in tool-call markup (`<invoke ...>`) and failed
 to run, which cost one call each time. The loop recovers from the error report.
@@ -110,7 +118,20 @@ prose before `FINISH`. Three runs of the same 8 placements as the extraction imp
 | first-block fix | 5 of 8 | 32 | 6 |
 | all fixes (before the no-`<parameter>` case) | 6 of 8 | 20 | 2 |
 
-The drop in calls and syntax errors is mechanical and real. The rise in successes (4, 5, 6) is
+Two further runs changed the embodiment notes in the prompt:
+
+| Run | Succeeded | False finishes | Truncated | LLM calls |
+|---|---|---|---|---|
+| gripper-reading hint added | 6 of 8 | 2 | 0 | 25 |
+| lift height corrected to "at least 18 cm" | 7 of 8 | 0 | 1 | 24 |
+
+The false finishes had a concrete cause. The notes had said to raise the cube "about 15 cm", the
+task needs more than 0.20 m above the base (the cube rests at 0.046 m, so a lift of 0.154 m or
+more), and the model followed the notes literally with a 0.15 m lift, 4 mm short. With the
+corrected wording the model lifted 0.22 m and no trial finished without success. The prompt
+differs between all of these runs, so the capx runs are not strictly comparable with each other.
+
+The drop in calls and syntax errors from the extraction fixes is mechanical and real. The rise in successes (4, 5, 6) is
 within noise: the simulator's GPU physics and the model both vary run to run, so those success
 counts should not be read as an improvement. Over 116 logged replies the final extractor yields
 parseable code for all but two (trailing stray markup). One failure the extraction cannot fix: a

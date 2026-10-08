@@ -265,3 +265,7 @@ def test_embodiment_docs_describe_frames_and_tool_axes() -> None:
     assert "z = 0.031 m" in docs
     assert "tool +z" in docs and "tool x" in docs
     assert "'front'" in docs
+    # the reading after a close separates empty (about 0) from holding the cube (about 0.06 to 0.13)
+    assert "closed on nothing" in docs and "0.06 to 0.13" in docs
+    assert "does not prove the cube is lifted" in docs
+    assert "at least 18 cm" in docs and "15 cm is not quite enough" in docs

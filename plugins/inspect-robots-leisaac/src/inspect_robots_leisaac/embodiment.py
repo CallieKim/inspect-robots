@@ -72,8 +72,12 @@ joints, so it cannot reach arbitrary tool orientations; a straight-down tool at 
 reachable, so prefer top-down grasps.
 
 The camera '{camera}' is fixed relative to the base and the table is flat. Lifting the cube means
-raising it about 15 cm clear of the table; the episode ends when it is lifted. A grasp that closes
-on nothing leaves the gripper at 0; a grasp that holds an object stops at its width."""
+raising it at least 18 cm above where it sits (15 cm is not quite enough); the episode ends once
+it is lifted. After closing, the
+gripper reading says whether the jaws hold something. About 0.00 means they closed on nothing. A
+reading of roughly 0.06 to 0.13 means they stopped on the 3 cm cube, which keeps them apart. That
+reading does not prove the cube is lifted: after raising the arm, check the camera frame, or
+segment the cube again, and confirm it rose with the gripper before you stop."""
 
 
 GRIPPER_CLOSED_RAD = 0.0
