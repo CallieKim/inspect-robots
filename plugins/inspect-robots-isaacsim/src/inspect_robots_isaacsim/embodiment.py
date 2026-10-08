@@ -264,9 +264,41 @@ class IsaacSimEmbodiment:
             from isaaclab.app import AppLauncher
         except ImportError as exc:  # pragma: no cover - exercised only without Isaac
             raise _missing_isaac(exc) from exc
-        self._app = AppLauncher(headless=self.headless, device=self.device).app
+        self._app = AppLauncher(**self._launcher_kwargs()).app
         _ACTIVE_APP = self._app
         return self._app
+
+    def _launcher_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for Isaac Lab's ``AppLauncher``.
+
+        ``enable_cameras`` selects Kit's rendering experience. Isaac Lab 3.0 fixes
+        the experience at launch, so a camera task launched without it has no RTX
+        renderer and crashes when its cameras initialise. Subclasses extend this
+        (for example to open a viewport).
+        """
+        return {
+            "headless": self.headless,
+            "device": self.device,
+            "enable_cameras": bool(self.info.observation_space.cameras),
+        }
+
+    def _register_tasks(self) -> None:
+        """Import any package that registers extra gym ids (no-op by default).
+
+        Called after the app boots and before the env cfg is parsed. Subclasses
+        wrapping a task suite outside ``isaaclab_tasks`` import it here.
+        """
+
+    def _prepare_env_cfg(self, env_cfg: Any) -> None:
+        """Adjust the parsed env cfg before ``gym.make`` (no-op by default)."""
+
+    def _post_reset(self, env: Any, obs: Any) -> Any:
+        """Return the observation to report after ``env.reset`` (unchanged by default)."""
+        return obs
+
+    def _observation_extra(self) -> dict[str, Any]:
+        """Extra observation entries such as camera calibration (none by default)."""
+        return {}
 
     def _ensure_env(self) -> Any:
         """Build the gym env on first use (boots the app if needed)."""
@@ -280,11 +312,13 @@ class IsaacSimEmbodiment:
             from isaaclab_tasks.utils import parse_env_cfg
         except ImportError as exc:
             raise _missing_isaac(exc) from exc
+        self._register_tasks()
 
         # Isaac Lab envs take a mandatory cfg object (gym.make(task_id) alone
         # raises "missing 1 required positional argument: 'cfg'"); parse_env_cfg
         # is Isaac Lab's own task-id -> config resolution.
         env_cfg = parse_env_cfg(self.task_id, device=self.device, num_envs=1)
+        self._prepare_env_cfg(env_cfg)
         if self.headless:
             _disable_debug_vis(env_cfg)
         _request_named_obs_terms(env_cfg, self.obs_group)
@@ -298,6 +332,7 @@ class IsaacSimEmbodiment:
         """Start Isaac Lab lazily, apply the seed, and preserve the scene instruction."""
         env = self._ensure_env()
         obs, _info = env.reset(seed=seed)
+        obs = self._post_reset(env, obs)
         return self._to_observation(obs, scene.instruction)
 
     def step(self, action: Action) -> StepResult:
@@ -336,11 +371,20 @@ class IsaacSimEmbodiment:
             self._env.close()
             self._env = None
         if self._app is not None:
-            self._app.close()
-            if _ACTIVE_APP is self._app:
+            if self._close_app(self._app) and _ACTIVE_APP is self._app:
                 _ACTIVE_APP = None
             self._app = None
         self._torch = None
+
+    def _close_app(self, app: Any) -> bool:
+        """Shut the Isaac Sim app down and report whether it was closed.
+
+        Returning False keeps the module-level app registered, so a later embodiment
+        in the same process reuses it. Subclasses override this when closing the app
+        would end the process (Kit's fast shutdown does).
+        """
+        app.close()
+        return True
 
     def __enter__(self) -> IsaacSimEmbodiment:
         return self
@@ -367,7 +411,12 @@ class IsaacSimEmbodiment:
                 if isinstance(group, Mapping) and key in group:
                     state[field.key] = _to_float_array(group[key])
 
-        return Observation(images=images, state=state, instruction=instruction)
+        return Observation(
+            images=images,
+            state=state,
+            instruction=instruction,
+            extra=self._observation_extra(),
+        )
 
     def _read_success(self, info: Any, terminated: Any) -> bool:
         if isinstance(info, Mapping) and self.success_info_key in info:

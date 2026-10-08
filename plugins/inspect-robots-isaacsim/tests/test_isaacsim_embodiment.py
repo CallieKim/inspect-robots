@@ -483,3 +483,65 @@ def test_ensure_env_skips_debug_vis_disable_when_not_headless(
 
     assert calls["debug_vis_at_make"] is True  # untouched: headless=False skips the disable
     assert calls["concatenate_terms_at_make"] is False  # still requested either way
+
+
+def test_launcher_kwargs_enable_cameras_only_when_cameras_declared() -> None:
+    assert IsaacSimEmbodiment()._launcher_kwargs()["enable_cameras"] is True
+    assert IsaacSimEmbodiment(cameras=())._launcher_kwargs()["enable_cameras"] is False
+
+
+def test_close_shuts_down_the_app_and_clears_it() -> None:
+    closed: list[bool] = []
+
+    class _App:
+        def close(self) -> None:
+            closed.append(True)
+
+    emb = IsaacSimEmbodiment()
+    emb._app = _App()
+    emb.close()
+    assert closed == [True]
+    assert emb._app is None
+
+
+def test_close_keeps_the_shared_app_registered_when_a_subclass_leaves_it_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots_isaacsim import embodiment as module
+
+    class _Keeps(IsaacSimEmbodiment):
+        def _close_app(self, app: Any) -> bool:
+            return False
+
+    app = object()
+    monkeypatch.setattr(module, "_ACTIVE_APP", app)
+    emb = _Keeps()
+    emb._app = app
+    emb.close()
+    assert emb._app is None
+    assert module._ACTIVE_APP is app
+
+
+def test_observation_extra_defaults_to_empty_and_reaches_the_observation() -> None:
+    class _WithExtra(IsaacSimEmbodiment):
+        def _observation_extra(self) -> dict[str, Any]:
+            return {"intrinsics": np.eye(3)}
+
+    assert IsaacSimEmbodiment()._to_observation({}, "go").extra == {}
+    extra = _WithExtra()._to_observation({}, "go").extra
+    np.testing.assert_array_equal(extra["intrinsics"], np.eye(3))
+
+
+def test_reset_reports_the_post_reset_observation() -> None:
+    class _Env:
+        def reset(self, *, seed: int | None = None) -> tuple[Any, dict[str, Any]]:
+            return {"policy": {"joint_pos": np.array([[0.0]])}}, {}
+
+    class _Settled(IsaacSimEmbodiment):
+        def _post_reset(self, env: Any, obs: Any) -> Any:
+            return {"policy": {"joint_pos": np.array([[9.0]])}}
+
+    emb = _Settled()
+    emb._env = _Env()
+    obs = emb.reset(Scene(id="s", instruction="go"))
+    assert obs.state["joint_pos"].tolist() == [9.0]
